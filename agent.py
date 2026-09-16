@@ -42,8 +42,19 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "600"))
 
+def _st_secret(key):
+    """Reads a Streamlit secret if running under Streamlit with a secrets.toml
+    configured; returns None in any other context (CLI, tests, no secrets file)."""
+    try:
+        import streamlit as st
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
+
 OPENAI_API_KEY = (
-    os.environ.get("OPENAI_API_KEY")
+    _st_secret("OPENAI_API_KEY")
+    or os.environ.get("OPENAI_API_KEY")
     or _DOTENV.get("OPENAI_API_KEY")
     or _DOTENV.get("openai")
     or _DOTENV.get("OPENAI_KEY")
