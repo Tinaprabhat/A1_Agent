@@ -251,7 +251,15 @@ def _select_openai_model(api_key):
     )
 
 
-OPENAI_MODEL = _select_openai_model(OPENAI_API_KEY) if OPENAI_API_KEY else None
+OPENAI_MODEL = None
+OPENAI_INIT_ERROR = None
+if OPENAI_API_KEY:
+    try:
+        OPENAI_MODEL = _select_openai_model(OPENAI_API_KEY)
+    except RuntimeError as e:
+        OPENAI_INIT_ERROR = str(e)
+else:
+    OPENAI_INIT_ERROR = "No OPENAI_API_KEY found (checked Streamlit secrets, env vars, and .env)."
 
 
 def call_openai(messages, model=None, temperature=0.4, timeout=OPENAI_TIMEOUT):
@@ -259,7 +267,12 @@ def call_openai(messages, model=None, temperature=0.4, timeout=OPENAI_TIMEOUT):
     Calls the OpenAI chat completions endpoint. Raises RuntimeError on failure.
     messages: list of {"role": "system"|"user"|"assistant", "content": str}
     """
+    if not OPENAI_API_KEY:
+        raise RuntimeError(OPENAI_INIT_ERROR or "No OPENAI_API_KEY configured.")
     model = model or OPENAI_MODEL
+    if not model:
+        raise RuntimeError(OPENAI_INIT_ERROR or "No usable OpenAI model available.")
+
     payload = {
         "model": model,
         "messages": messages,
@@ -282,9 +295,10 @@ def call_openai(messages, model=None, temperature=0.4, timeout=OPENAI_TIMEOUT):
         raise RuntimeError(f"OpenAI call failed: {e}")
 
 
-def call_llm(messages, model=None, temperature=0.4, timeout=None):
-    """Dispatches to the configured backend (LLM_BACKEND: 'openai' or 'ollama')."""
-    if LLM_BACKEND == "openai":
+def call_llm(messages, model=None, temperature=0.4, timeout=None, backend=None):
+    """Dispatches to `backend` ('openai' or 'ollama'), or LLM_BACKEND if not given."""
+    backend = backend or LLM_BACKEND
+    if backend == "openai":
         return call_openai(messages, model=model, temperature=temperature, timeout=timeout or OPENAI_TIMEOUT)
     return call_ollama(messages, model=model or OLLAMA_MODEL, temperature=temperature, timeout=timeout or OLLAMA_TIMEOUT)
 
@@ -292,16 +306,28 @@ def call_llm(messages, model=None, temperature=0.4, timeout=None):
 # ---------------------------------------------------------------------
 # VALIDATE + RETRY ORCHESTRATION
 # ---------------------------------------------------------------------
-def get_reply(conversation_history, user_input, logger=None, model=None):
+def get_reply(conversation_history, user_input, logger=None, model=None, backend=None):
     """
     Runs one full turn: build messages, call the LLM, validate the reply
     against A1spec.json, and retry once (MAX_ATTEMPTS total) if invalid.
     Always returns the last attempt's reply text, even if still invalid.
 
+    `backend`, if given, overrides LLM_BACKEND for this call (e.g. ui.py
+    forces "openai" so it never falls through to a local Ollama call).
+
+    Raises RuntimeError immediately (no attempts logged as calls) if the
+    chosen backend has no usable key/model — callers should catch this and
+    show it to the user rather than letting the loop retry a call that
+    cannot succeed.
+
     Returns: (reply_text, attempts_used, final_valid, final_reasons)
     """
     logger = logger or Logger()
-    model = model or (OPENAI_MODEL if LLM_BACKEND == "openai" else OLLAMA_MODEL)
+    backend = backend or LLM_BACKEND
+    model = model or (OPENAI_MODEL if backend == "openai" else OLLAMA_MODEL)
+
+    if backend == "openai" and (not OPENAI_API_KEY or not model):
+        raise RuntimeError(OPENAI_INIT_ERROR or "OpenAI is not configured.")
 
     logger.log("user_input", text=user_input)
 
@@ -311,8 +337,8 @@ def get_reply(conversation_history, user_input, logger=None, model=None):
     messages = build_messages(conversation_history)
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
-        logger.log("llm_call", attempt=attempt, backend=LLM_BACKEND, model=model, messages_count=len(messages))
-        reply = call_llm(messages, model=model)
+        logger.log("llm_call", attempt=attempt, backend=backend, model=model, messages_count=len(messages))
+        reply = call_llm(messages, model=model, backend=backend)
         logger.log("llm_reply", attempt=attempt, reply=reply)
 
         valid, reasons = validator.validate(reply, user_input, SPEC)
